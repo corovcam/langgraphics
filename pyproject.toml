@@ -48,6 +48,9 @@ pythonpath = ["."]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[project.scripts]
+langgraphics-server = "langgraphics.server:main"
+
 [tool.hatch.build]
 include = ["langgraphics/**/*"]
 ignore-vcs = true

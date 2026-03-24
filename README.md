@@ -22,6 +22,9 @@ about the workflow than reading the graph definition ever could.
 
 ## How to use
 
+
+### In-process
+
 One line is all it takes - wrap the compiled graph of your agent workflow with LangGraphics' `watch` function before
 invoking it, and the visualization opens in your browser automatically, tracking the agent in real time.
 
@@ -40,6 +43,35 @@ await graph.ainvoke({"messages": [...]})
 
 Works with any LangGraph agent, no matter how simple or complex the graph is. Add it during a debugging session, or keep
 it in while you're actively building - it has no effect on how the agent behaves or what it returns.
+
+
+### Standalone Server
+
+It is possible to run the server as standalone process and instrument from an agent
+
+To do that:
+
+1. Update your watch call to connect to a running server
+  ```python
+  from langgraph.graph import StateGraph, MessagesState
+  from langgraphics import watch, connect_server
+
+  workflow = StateGraph(MessagesState)
+  workflow.add_node(...)
+  workflow.add_edge(...)
+
+  graph = builder.compile()
+  server = connect_server()             # Standalone server details
+  graph = watch(graph, server=server)   # Pass it to watch
+  ```
+
+2. Run the standalone server 
+  ```bash
+  uv run langgraphics-server
+  ```
+
+3. Run your agent script as usual and open your browser to the server address
+
 
 ## Features
 

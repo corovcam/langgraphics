@@ -2,13 +2,13 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from socketserver import TCPServer
 from typing import Any
 
 from langchain_core.tracers.base import AsyncBaseTracer
 from langchain_core.tracers.schemas import Run
 
 from .formatter import Formatter
+from .relay import PublisherRelay
 
 
 class BroadcastingTracer(AsyncBaseTracer):
@@ -102,15 +102,13 @@ class Viewport:
     def __init__(
         self,
         graph: Any,
-        ws: Any,
+        relay: PublisherRelay,
         edge_lookup: dict[tuple[str, str], str],
-        http_server: TCPServer,
     ) -> None:
-        self.ws = ws
+        self.relay = relay
         self.graph = graph
         self.node_current = None
         self.edge_lookup = edge_lookup
-        self.http_server = http_server
         self.node_names: set[str] = set()
         self.predecessors: dict[str, set[str]] = {}
         for src, tgt in edge_lookup:
@@ -125,18 +123,7 @@ class Viewport:
         return getattr(self.graph, name)
 
     async def broadcast(self, message: dict[str, Any]) -> None:
-        message_str = json.dumps(message)
-        self.ws.record(message_str)
-        if self.ws.loop is None:
-            return
-        try:
-            await asyncio.wrap_future(
-                asyncio.run_coroutine_threadsafe(
-                    self.ws.broadcast(message_str), self.ws.loop
-                )
-            )
-        except Exception:
-            pass
+        await self.relay.send(json.dumps(message))
 
     async def _emit_edge(self, target: str) -> None:
         for source in self.predecessors.get(target, set()):
@@ -176,8 +163,7 @@ class Viewport:
         return merged
 
     async def shutdown(self) -> None:
-        await self.ws.shutdown()
-        self.http_server.shutdown()
+        await self.relay.shutdown()
 
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
         run_id = uuid.uuid4().hex[:8]
@@ -204,8 +190,6 @@ class Viewport:
         except Exception:
             await self._emit_error(last_node)
             raise
-        finally:
-            await self.shutdown()
 
         return result
 
