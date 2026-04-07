@@ -16,7 +16,11 @@ from .broadcaster import Broadcaster
 def _start_http_server(host: str, port: int) -> TCPServer:
     static = Path(__file__).parent / "static"
     handler = partial(SimpleHTTPRequestHandler, directory=static)
-    server = TCPServer((host, port), handler)
+
+    class _Server(TCPServer):
+        allow_reuse_address = True
+
+    server = _Server((host, port), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -124,7 +128,7 @@ def main() -> None:
     args = parser.parse_args()
 
     server = start_server(host=args.host, port=args.port, ws_port=args.ws_port)
-    print(f"LangGraphics server running")
+    print("LangGraphics server running")
     print(f"  Frontend : {server.url}")
     print(f"  WebSocket: {server.ws_url}")
     print(f"  Publish  : {server.publish_url}")
