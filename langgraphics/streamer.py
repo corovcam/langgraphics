@@ -1,88 +1,97 @@
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any
 
 from langchain_core.tracers.base import AsyncBaseTracer
 from langchain_core.tracers.schemas import Run
 
 from .formatter import Formatter
-from .relay import PublisherRelay
 
 
 class BroadcastingTracer(AsyncBaseTracer):
     """Intercepts LangChain/LangGraph callbacks and broadcasts execution events.
 
     Owns all event emission: run lifecycle, edge traversals, and node outputs.
-    A fresh instance is created per invocation so generation/linked state never
-    bleeds across runs.
+    A fresh instance is created per invocation so all per-run state is isolated.
     """
 
     def __init__(
         self,
-        viewport: "Viewport",
-        edge_lookup: dict[tuple[str, str], str],
+        broadcast_fn: Callable[[dict[str, Any]], Awaitable[None]],
+        node_names: set[str],
+        edge_seeding: dict[tuple[str, str], str] | None = None,
     ) -> None:
         """
         Args:
-            viewport: The Viewport that owns this tracer. Used solely to call
-                ``viewport.broadcast()`` when emitting events.
-            edge_lookup: Mapping of ``(source_node, target_node)`` pairs to their
-                edge IDs as defined in the static topology. Used to resolve edge IDs
-                when emitting ``edge_active`` events and to identify which chain runs
-                correspond to graph nodes vs. sub-calls (LLM, tool, etc.).
+            broadcast_fn: Coroutine called with each event dict to send to viewers.
+            node_names: Set of graph node names from static topology. Used to
+                identify which chain runs are graph nodes vs. internal LangGraph
+                operations or sub-calls (LLM, tool, etc.).
+            edge_seeding: Optional ``(source, target) -> edge_id`` mapping from the
+                static topology. Pre-seeding keeps dynamic IDs aligned with the IDs
+                already present in the initial ``graph`` message so the frontend can
+                match ``edge_active`` events to the correct visual edges.
         """
         super().__init__(_schema_format="original+chat")
-        self.viewport = viewport
+        self._broadcast = broadcast_fn
+        self.node_names = node_names
         self.states: dict[str, Any] = {}
 
-        # Static topology — used for edge inference and node identity (Phase 1).
-        self.edge_lookup = edge_lookup
-        self.node_names: set[str] = set()
-        self.predecessors: dict[str, set[str]] = {}
-        for src, tgt in edge_lookup:
-            self.node_names.add(src)
-            self.node_names.add(tgt)
-            self.predecessors.setdefault(tgt, set()).add(src)
-        self.node_names -= {"__start__", "__end__"}
-
-        # Per-run state (reset automatically since a new tracer is created each call).
-        self.generation: dict[str, int] = {"__start__": 0}
-        self.linked: set[tuple[str, int, str]] = set()
-
-        # Run tracking.
+        # Run lifecycle.
         self.root_run_id: str | None = None
         self.node_run_ids: set[str] = set()
         self.run_id: str | None = None
-        self.current_node: str | None = None  # last graph node that started
-        self.last_completed_node: str = "__start__"
+
+        # Dynamic edge inference: tracks the last completed node per parent scope.
+        self.last_completed: dict[str, str] = {}  # parent_run_id -> last node name
+
+        # Dynamic edge ID assignment — pre-seeded from static topology when provided.
+        self.discovered_edges: dict[tuple[str, str], str] = dict(edge_seeding or {})
+        self.edge_counter: int = len(self.discovered_edges)
+
+        # Error tracking.
+        self.current_node: str | None = None
         self.error_emitted: bool = False
 
     async def _persist_run(self, run: Run) -> None:
         pass
 
-    async def _emit_edge(self, target: str) -> None:
-        for source in self.predecessors.get(target, set()):
-            if (src_gen := self.generation.get(source)) is None:
-                continue
-            if (key := (source, src_gen, target)) in self.linked:
-                continue
-            self.linked.add(key)
-            if edge_id := self.edge_lookup.get((source, target)):
-                await self.viewport.broadcast(
-                    {
-                        "type": "edge_active",
-                        "source": source,
-                        "target": target,
-                        "edge_id": edge_id,
-                    }
-                )
-        self.generation[target] = self.generation.get(target, -1) + 1
+    def _get_or_create_edge(self, source: str, target: str) -> tuple[str, bool]:
+        """Return (edge_id, is_new). Assigns a new ID the first time an edge is seen."""
+        key = (source, target)
+        if key not in self.discovered_edges:
+            edge_id = f"e{self.edge_counter}"
+            self.edge_counter += 1
+            self.discovered_edges[key] = edge_id
+            return edge_id, True
+        return self.discovered_edges[key], False
+
+    async def _emit_edge_traversal(self, source: str, target: str) -> None:
+        """Emit edge_discovered (first time only) then edge_active for each traversal."""
+        edge_id, is_new = self._get_or_create_edge(source, target)
+        if is_new:
+            await self._broadcast(
+                {
+                    "type": "edge_discovered",
+                    "edge_id": edge_id,
+                    "source": source,
+                    "target": target,
+                }
+            )
+        await self._broadcast(
+            {
+                "type": "edge_active",
+                "source": source,
+                "target": target,
+                "edge_id": edge_id,
+            }
+        )
 
     async def _emit_node_output(self, run: Run) -> None:
         state = self.states.get(run.name)
-        await self.viewport.broadcast(
+        await self._broadcast(
             {
                 "type": "node_output",
                 "node_id": run.name,
@@ -108,7 +117,7 @@ class BroadcastingTracer(AsyncBaseTracer):
         if node_run_id is None:
             return
         state = self.states.get(run.name)
-        await self.viewport.broadcast(
+        await self._broadcast(
             {
                 "type": "node_output",
                 "run_id": str(run.id),
@@ -129,19 +138,6 @@ class BroadcastingTracer(AsyncBaseTracer):
             }
         )
 
-    async def _emit_graph_error(self) -> None:
-        if self.current_node is None:
-            return
-        edge_id = self.edge_lookup.get((self.last_completed_node, self.current_node))
-        await self.viewport.broadcast(
-            {
-                "type": "error",
-                "edge_id": edge_id,
-                "source": self.last_completed_node,
-                "target": self.current_node,
-            }
-        )
-
     async def _on_chain_start(self, run: Run) -> None:
         self.states[run.name] = run.inputs
 
@@ -149,7 +145,7 @@ class BroadcastingTracer(AsyncBaseTracer):
             # First chain run is the graph root.
             self.root_run_id = str(run.id)
             self.run_id = uuid.uuid4().hex[:8]
-            await self.viewport.broadcast({"type": "run_start", "run_id": self.run_id})
+            await self._broadcast({"type": "run_start", "run_id": self.run_id})
             return
 
         if str(run.parent_run_id) == self.root_run_id and run.name in self.node_names:
@@ -157,30 +153,60 @@ class BroadcastingTracer(AsyncBaseTracer):
             self.node_run_ids.add(str(run.id))
             self.current_node = run.name
 
+            # Infer predecessor from the last completed node in this scope.
+            predecessor = self.last_completed.get(self.root_run_id) or "__start__"
+            await self._emit_edge_traversal(predecessor, run.name)
+            await self._broadcast(
+                {
+                    "type": "node_discovered",
+                    "node_id": run.name,
+                    "node_kind": run.run_type,
+                    "run_id": self.run_id,
+                    "parent_node_id": None,
+                }
+            )
+
     async def _on_chain_end(self, run: Run) -> None:
         if str(run.id) == self.root_run_id:
-            await self._emit_edge("__end__")
-            await self.viewport.broadcast({"type": "run_end", "run_id": self.run_id})
+            last = self.last_completed.get(self.root_run_id) or "__start__"
+            await self._emit_edge_traversal(last, "__end__")
+            await self._broadcast({"type": "run_end", "run_id": self.run_id})
             return
 
         if str(run.id) in self.node_run_ids:
             await self._emit_node_output(run)
-            await self._emit_edge(run.name)
-            self.last_completed_node = run.name
+            self.last_completed[self.root_run_id] = run.name
         else:
             await self._emit_sub_output(run)
 
     async def _on_chain_error(self, run: Run) -> None:
         if str(run.id) == self.root_run_id:
-            # Root errored — emit graph error if a node error hasn't already done it.
-            if not self.error_emitted:
-                await self._emit_graph_error()
+            if not self.error_emitted and self.current_node is not None:
+                predecessor = self.last_completed.get(self.root_run_id) or "__start__"
+                edge_id = self.discovered_edges.get((predecessor, self.current_node))
+                await self._broadcast(
+                    {
+                        "type": "error",
+                        "edge_id": edge_id,
+                        "source": predecessor,
+                        "target": self.current_node,
+                    }
+                )
             return
 
         if str(run.id) in self.node_run_ids:
             await self._emit_node_output(run)
             if not self.error_emitted:
-                await self._emit_graph_error()
+                predecessor = self.last_completed.get(self.root_run_id) or "__start__"
+                edge_id = self.discovered_edges.get((predecessor, run.name))
+                await self._broadcast(
+                    {
+                        "type": "error",
+                        "edge_id": edge_id,
+                        "source": predecessor,
+                        "target": run.name,
+                    }
+                )
                 self.error_emitted = True
         else:
             await self._emit_sub_output(run)
@@ -208,27 +234,30 @@ class Viewport:
     def __init__(
         self,
         graph: Any,
-        relay: PublisherRelay,
-        edge_lookup: dict[tuple[str, str], str],
+        broadcast_fn: Callable[[dict[str, Any]], Awaitable[None]],
+        shutdown_fn: Callable[[], Awaitable[None]],
+        node_names: set[str],
+        edge_seeding: dict[tuple[str, str], str] | None = None,
     ) -> None:
-        self.relay = relay
         self.graph = graph
-        self._edge_lookup = edge_lookup
+        self._broadcast_fn = broadcast_fn
+        self._shutdown_fn = shutdown_fn
+        self._node_names = node_names
+        self._edge_seeding = edge_seeding
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.graph, name)
 
-    async def broadcast(self, message: dict[str, Any]) -> None:
-        await self.relay.send(json.dumps(message))
-
     def _make_config(self, config: Any) -> dict[str, Any]:
-        tracer = BroadcastingTracer(self, self._edge_lookup)
+        tracer = BroadcastingTracer(
+            self._broadcast_fn, self._node_names, self._edge_seeding
+        )
         merged: dict[str, Any] = dict(config or {})
         merged["callbacks"] = list(merged.get("callbacks") or []) + [tracer]
         return merged
 
     async def shutdown(self) -> None:
-        await self.relay.shutdown()
+        await self._shutdown_fn()
 
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
         return await self.graph.ainvoke(

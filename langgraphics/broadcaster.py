@@ -20,6 +20,7 @@ class Broadcaster:
     def __init__(self) -> None:
         self.connections: set[Any] = set()
         self.topology_json: str | None = None
+        self.discovery_events: list[str] = []
         self.replay: list[str] = []
         self.loop: asyncio.AbstractEventLoop | None = None
         self.server: Server | None = None
@@ -36,6 +37,8 @@ class Broadcaster:
         try:
             if self.topology_json is not None:
                 await websocket.send(self.topology_json)
+            for message in self.discovery_events:
+                await websocket.send(message)
             for message in self.replay:
                 await websocket.send(message)
             async for _message in websocket:
@@ -52,6 +55,7 @@ class Broadcaster:
                 if msg.get("type") == "graph":
                     self.topology_json = raw
                     self.replay = []
+                    self.discovery_events = []
                 else:
                     self.record(raw)
                 await self.broadcast(raw)
@@ -60,7 +64,9 @@ class Broadcaster:
 
     def record(self, message: str) -> None:
         msg_type = json.loads(message).get("type")
-        if msg_type == "run_start":
+        if msg_type in ("node_discovered", "edge_discovered"):
+            self.discovery_events.append(message)
+        elif msg_type == "run_start":
             self.replay = [message]
         elif msg_type in ("run_end", "error"):
             self.replay = []

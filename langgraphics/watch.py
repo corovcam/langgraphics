@@ -1,3 +1,4 @@
+import json
 import webbrowser
 from typing import Any, Literal
 
@@ -28,11 +29,12 @@ def watch(
     server instead.
     """
     topology = extract(graph)
-    edge_lookup = {(e["source"], e["target"]): e["id"] for e in topology["edges"]}
+    node_names = {n["id"] for n in topology["nodes"] if n["node_type"] == "node"}
+    edge_seeding = {(e["source"], e["target"]): e["id"] for e in topology["edges"]}
 
     if server is None:
         server = start_server(host=host, port=port, ws_port=ws_port)
-        
+
     if open_browser:
         defaults = (
             ("mode", mode, "auto"),
@@ -47,4 +49,10 @@ def watch(
     relay = PublisherRelay(topology, server.publish_url)
     relay._ready.wait(5.0)
 
-    return Viewport(graph, relay, edge_lookup)
+    async def broadcast_fn(message: dict[str, Any]) -> None:
+        await relay.send(json.dumps(message))
+
+    async def shutdown_fn() -> None:
+        await relay.shutdown()
+
+    return Viewport(graph, broadcast_fn, shutdown_fn, node_names, edge_seeding)

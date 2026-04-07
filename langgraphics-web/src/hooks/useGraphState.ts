@@ -1,6 +1,6 @@
 import {useMemo} from "react";
 import {type Edge, MarkerType, type Node} from "@xyflow/react";
-import type {EdgeData, EdgeStatus, ExecutionEvent, GraphMessage, NodeData, NodeStatus} from "../types";
+import type {EdgeData, EdgeStatus, ExecutionEvent, GraphMessage, NodeData, NodeStatus, ProtocolEdge, ProtocolNode} from "../types";
 import {computeLayout, type RankDir} from "../layout";
 
 export function computeStatuses(events: ExecutionEvent[]): {
@@ -16,6 +16,11 @@ export function computeStatuses(events: ExecutionEvent[]): {
             nodeStatuses.clear();
             edgeStatuses.clear();
             edgeInfo.clear();
+        } else if (event.type === "node_discovered") {
+            // Node started executing — mark it active immediately.
+            if (nodeStatuses.get(event.node_id) !== "error") {
+                nodeStatuses.set(event.node_id, "active");
+            }
         } else if (event.type === "edge_active") {
             edgeInfo.set(event.edge_id, {source: event.source, target: event.target});
             if (nodeStatuses.get(event.source) === "active") {
@@ -52,11 +57,47 @@ export function computeStatuses(events: ExecutionEvent[]): {
     return {nodeStatuses, edgeStatuses};
 }
 
+/** Build the working topology by merging the static graph message with any
+ *  nodes/edges discovered at runtime via node_discovered / edge_discovered. */
+export function buildDynamicTopology(
+    base: GraphMessage | null,
+    events: ExecutionEvent[],
+): GraphMessage | null {
+    const hasDiscovery = events.some(
+        (e) => e.type === "node_discovered" || e.type === "edge_discovered",
+    );
+    if (!hasDiscovery) return base;
+
+    const nodes = new Map<string, ProtocolNode>(base?.nodes.map((n) => [n.id, n]) ?? []);
+    const edges = new Map<string, ProtocolEdge>(base?.edges.map((e) => [e.id, e]) ?? []);
+
+    for (const event of events) {
+        if (event.type === "node_discovered" && !nodes.has(event.node_id)) {
+            nodes.set(event.node_id, {id: event.node_id, name: event.node_id, node_type: "node"});
+        } else if (event.type === "edge_discovered" && !edges.has(event.edge_id)) {
+            edges.set(event.edge_id, {
+                id: event.edge_id,
+                source: event.source,
+                target: event.target,
+                conditional: false,
+                label: null,
+            });
+        }
+    }
+
+    return {type: "graph", nodes: [...nodes.values()], edges: [...edges.values()]};
+}
+
 export function useGraphState(topology: GraphMessage | null, events: ExecutionEvent[], rankDir: RankDir = "TB") {
+    const dynamicTopology = useMemo(
+        () => buildDynamicTopology(topology, events),
+        [topology, events],
+    );
+
     const base = useMemo(() => {
-        if (!topology) return {nodes: [] as Node<NodeData>[], edges: [] as Edge<EdgeData>[]};
-        return computeLayout(topology, rankDir);
-    }, [topology, rankDir]);
+        if (!dynamicTopology) return {nodes: [] as Node<NodeData>[], edges: [] as Edge<EdgeData>[]};
+        return computeLayout(dynamicTopology, rankDir);
+    }, [dynamicTopology, rankDir]);
 
     return useMemo(() => {
         if (events.length === 0) return {nodes: base.nodes, edges: base.edges, activeNodeIds: [] as string[]};

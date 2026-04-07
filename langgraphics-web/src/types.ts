@@ -90,6 +90,21 @@ export interface ErrorMessage {
     edge_id: string | null;
 }
 
+export interface NodeDiscoveredMessage {
+    type: "node_discovered";
+    node_id: string;
+    node_kind: NodeKind | null;
+    run_id: string;
+    parent_node_id: string | null;
+}
+
+export interface EdgeDiscoveredMessage {
+    type: "edge_discovered";
+    edge_id: string;
+    source: string;
+    target: string;
+}
+
 export interface NodeMessage {
     type: "node_output";
     run_id: string;
@@ -107,8 +122,10 @@ export type NodeEntry = Omit<NodeMessage, "type">;
 
 export type WsMessage =
     | GraphMessage | RunStartMessage | RunEndMessage | NodeStartMessage
-    | NodeEndMessage | EdgeActiveMessage | ErrorMessage | NodeMessage;
+    | NodeEndMessage | EdgeActiveMessage | ErrorMessage | NodeMessage
+    | NodeDiscoveredMessage | EdgeDiscoveredMessage;
 
 export type ExecutionEvent =
     | RunStartMessage | RunEndMessage | NodeStartMessage | NodeEndMessage
-    | EdgeActiveMessage | ErrorMessage | NodeMessage;
+    | EdgeActiveMessage | ErrorMessage | NodeMessage
+    | NodeDiscoveredMessage | EdgeDiscoveredMessage;
