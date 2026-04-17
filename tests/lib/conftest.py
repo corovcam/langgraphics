@@ -1,13 +1,14 @@
 import asyncio
 import json
+import operator
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 
 import pytest
 import websockets
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
 
 
 def find_free_port() -> int:
@@ -77,6 +78,81 @@ def error_graph() -> StateGraph:
     builder.set_entry_point("good_node")
     builder.add_edge("good_node", "failing_node")
     builder.add_edge("failing_node", END)
+    return builder.compile()
+
+
+class SubgraphState(TypedDict):
+    value: str
+    summary: str
+
+
+@pytest.fixture
+def subgraph_graph() -> StateGraph:
+    """Graph where one top-level node invokes a compiled subgraph."""
+
+    def inner_step(state: SubgraphState) -> dict:
+        return {"summary": state["value"] + "_summarised"}
+
+    inner = StateGraph(SubgraphState)
+    inner.add_node("inner_step", inner_step)
+    inner.add_edge(START, "inner_step")
+    inner.add_edge("inner_step", END)
+    compiled_inner = inner.compile()
+
+    def outer_node(state: SimpleState) -> dict:
+        result = compiled_inner.invoke({"value": state["value"], "summary": ""})
+        return {"value": result["summary"]}
+
+    def final_node(state: SimpleState) -> dict:
+        return {"value": state["value"] + "_done"}
+
+    builder = StateGraph(SimpleState)
+    builder.add_node("outer_node", outer_node)
+    builder.add_node("final_node", final_node)
+    builder.set_entry_point("outer_node")
+    builder.add_edge("outer_node", "final_node")
+    builder.add_edge("final_node", END)
+    return builder.compile()
+
+
+class FanoutState(TypedDict):
+    value: str
+    results: Annotated[list[str], operator.add]
+
+
+@pytest.fixture
+def fanout_graph() -> StateGraph:
+    """Graph with a fan-out (one → three parallel) then fan-in (three → one)."""
+
+    def source(state: FanoutState) -> dict:
+        return {"value": state["value"] + "_source"}
+
+    def branch_a(state: FanoutState) -> dict:
+        return {"results": ["a"]}
+
+    def branch_b(state: FanoutState) -> dict:
+        return {"results": ["b"]}
+
+    def branch_c(state: FanoutState) -> dict:
+        return {"results": ["c"]}
+
+    def sink(state: FanoutState) -> dict:
+        return {"value": ",".join(state["results"])}
+
+    builder = StateGraph(FanoutState)
+    builder.add_node("source", source)
+    builder.add_node("branch_a", branch_a)
+    builder.add_node("branch_b", branch_b)
+    builder.add_node("branch_c", branch_c)
+    builder.add_node("sink", sink)
+    builder.add_edge(START, "source")
+    builder.add_edge("source", "branch_a")
+    builder.add_edge("source", "branch_b")
+    builder.add_edge("source", "branch_c")
+    builder.add_edge("branch_a", "sink")
+    builder.add_edge("branch_b", "sink")
+    builder.add_edge("branch_c", "sink")
+    builder.add_edge("sink", END)
     return builder.compile()
 
 

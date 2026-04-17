@@ -29,7 +29,6 @@ def watch(
     server instead.
     """
     topology = extract(graph)
-    node_names = {n["id"] for n in topology["nodes"] if n["node_type"] == "node"}
     edge_seeding = {(e["source"], e["target"]): e["id"] for e in topology["edges"]}
 
     if server is None:
@@ -55,4 +54,4 @@ def watch(
     async def shutdown_fn() -> None:
         await relay.shutdown()
 
-    return Viewport(graph, broadcast_fn, shutdown_fn, node_names, edge_seeding)
+    return Viewport(graph, broadcast_fn, shutdown_fn, edge_seeding)

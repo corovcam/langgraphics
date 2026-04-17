@@ -8,6 +8,8 @@ export function useWebSocket(url: string) {
     const [events, setEvents] = useState<ExecutionEvent[]>([]);
     const [nodeEntries, setNodeEntries] = useState<NodeEntry[]>([]);
     const [topology, setTopology] = useState<GraphMessage | null>(null);
+    const [discoveryEvents, setDiscoveryEvents] = useState<ExecutionEvent[]>([]);
+    const [rawMessages, setRawMessages] = useState<WsMessage[]>([]);
     const wsRef = useRef<WebSocket | null>(null);
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -39,20 +41,45 @@ export function useWebSocket(url: string) {
                 if (unmounted) return;
                 try {
                     const msg: WsMessage = JSON.parse(event.data);
+                    console.log("[ws]", msg.type, msg);
+                    setRawMessages((prev) => [...prev.slice(-200), msg]);
                     if (msg.type === "graph") {
                         runDone = false;
                         setEvents([]);
                         setTopology(msg);
                         setNodeEntries([]);
+                        setDiscoveryEvents([]);
                     } else if (msg.type === "run_start") {
                         runDone = false;
-                        setEvents([msg]);
                         setNodeEntries([]);
+                        setEvents((prev) => {
+                            // Preserve topology-discovery events so subgraph children
+                            // survive the run_start state reset on replay.
+                            const topoEvents = prev.filter(
+                                (e) => e.type === "node_discovered" || e.type === "edge_discovered",
+                            );
+                            return [...topoEvents, msg];
+                        });
                     } else if (msg.type === "node_output") {
                         const {type: _, ...entry} = msg;
-                        setNodeEntries((prev) => [...prev, entry]);
+                        setNodeEntries((prev) => {
+                            const idx = prev.findIndex((e) => e.run_id === entry.run_id);
+                            if (idx >= 0) {
+                                const updated = [...prev];
+                                updated[idx] = entry;
+                                return updated;
+                            }
+                            return [...prev, entry];
+                        });
+                        // Also flow into events so computeStatuses can mark the node completed.
+                        setEvents((prev) => [...prev, msg as ExecutionEvent]);
                     } else {
                         if (msg.type === "run_end" || msg.type === "error") runDone = true;
+                        // node_discovered / edge_discovered also go to discoveryEvents
+                        // so buildDynamicTopology only reruns on structural changes.
+                        if (msg.type === "node_discovered" || msg.type === "edge_discovered") {
+                            setDiscoveryEvents((prev) => [...prev, msg as ExecutionEvent]);
+                        }
                         setEvents((prev) => [...prev, msg as ExecutionEvent]);
                     }
                 } catch {
@@ -74,5 +101,5 @@ export function useWebSocket(url: string) {
         };
     }, [url]);
 
-    return {topology, events, nodeEntries};
+    return {topology, events, nodeEntries, discoveryEvents, rawMessages};
 }

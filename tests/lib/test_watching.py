@@ -55,14 +55,17 @@ async def test_branching_message_sequence(branching_graph):
         f"All messages: {[m['type'] for m in messages]}"
     )
 
+    # First edge: __start__ → process (first invocation)
     assert edge_events[0]["source"] == "__start__"
     assert edge_events[0]["target"] == "process"
 
+    # Loop edges: same node re-activated sequentially via self-edge
     assert edge_events[1]["source"] == "process"
     assert edge_events[1]["target"] == "process"
     assert edge_events[2]["source"] == "process"
     assert edge_events[2]["target"] == "process"
 
+    # Final edge: process → __end__
     assert edge_events[-1]["source"] == "process"
     assert edge_events[-1]["target"] == "__end__"
 
@@ -151,10 +154,8 @@ async def test_node_discovered_fires_before_node_output(simple_graph):
 
 async def test_edge_active_ids_match_static_topology(branching_graph):
     """edge_active events use the same edge ID as the static topology for the same
-    source->target pair.
-
-    Regression: dynamic edge IDs were previously assigned in traversal order rather
-    than definition order, causing mismatches for conditional/looping graphs.
+    source->target pair. All edges in a loop graph are statically known so no
+    dynamic discovery should be needed.
     """
     ws_port = find_free_port()
     viewport = watch(branching_graph, port=find_free_port(), ws_port=ws_port, open_browser=False)
@@ -163,10 +164,14 @@ async def test_edge_active_ids_match_static_topology(branching_graph):
         await safe_ainvoke(viewport, {"value": "test", "counter": 0})
 
     topology_ids = {(e["source"], e["target"]): e["id"] for e in messages[0]["edges"]}
+    # Also include any edges dynamically discovered during the run.
+    for m in messages:
+        if m["type"] == "edge_discovered":
+            topology_ids[(m["source"], m["target"])] = m["edge_id"]
 
     for event in (m for m in messages if m["type"] == "edge_active"):
         pair = (event["source"], event["target"])
-        assert pair in topology_ids, f"Unexpected edge pair {pair} not in static topology"
+        assert pair in topology_ids, f"Unexpected edge pair {pair} not in known edges"
         assert event["edge_id"] == topology_ids[pair], (
             f"edge_active for {pair}: expected id '{topology_ids[pair]}', got '{event['edge_id']}'"
         )
@@ -200,3 +205,86 @@ async def test_late_viewer_receives_node_discovery_events(simple_graph):
     )
     # Replay buffer is cleared on run_end, so no run lifecycle events replayed.
     assert not any(m["type"] == "run_start" for m in late_messages)
+
+
+async def test_subgraph_node_discovered_with_parent(subgraph_graph):
+    """Nodes inside a compiled subgraph are discovered with parent_node_id set."""
+    ws_port = find_free_port()
+    viewport = watch(subgraph_graph, port=find_free_port(), ws_port=ws_port, open_browser=False)
+
+    async with ws_collect(ws_port) as (messages, done):
+        await safe_ainvoke(viewport, {"value": "test"})
+
+    discovered = {m["node_id"]: m for m in messages if m["type"] == "node_discovered"}
+
+    # Top-level nodes have no parent.
+    assert "outer_node" in discovered
+    assert discovered["outer_node"]["parent_node_id"] is None
+
+    # Subgraph node is discovered with its parent top-level node.
+    assert "inner_step" in discovered
+    assert discovered["inner_step"]["parent_node_id"] == "outer_node"
+
+
+async def test_subgraph_node_output_emitted(subgraph_graph):
+    """node_output is emitted for subgraph nodes as well as top-level nodes."""
+    ws_port = find_free_port()
+    viewport = watch(subgraph_graph, port=find_free_port(), ws_port=ws_port, open_browser=False)
+
+    async with ws_collect(ws_port) as (messages, done):
+        await safe_ainvoke(viewport, {"value": "test"})
+
+    output_node_ids = {m["node_id"] for m in messages if m["type"] == "node_output"}
+    assert "outer_node" in output_node_ids
+    assert "inner_step" in output_node_ids
+    assert "final_node" in output_node_ids
+
+
+async def test_subgraph_inner_node_has_parent_run_id(subgraph_graph):
+    """Inner nodes nest under an intermediate subgraph root, which nests under the parent node."""
+    ws_port = find_free_port()
+    viewport = watch(subgraph_graph, port=find_free_port(), ws_port=ws_port, open_browser=False)
+
+    async with ws_collect(ws_port) as (messages, done):
+        await safe_ainvoke(viewport, {"value": "test"})
+
+    # Build by run_id (last message wins so "ok" replaces "running" for the subgraph root).
+    outputs_by_run_id: dict[str, dict] = {}
+    outputs_by_node_id: dict[str, dict] = {}
+    for m in messages:
+        if m["type"] == "node_output":
+            outputs_by_run_id[m["run_id"]] = m
+            outputs_by_node_id[m["node_id"]] = m
+
+    outer_run_id = outputs_by_node_id["outer_node"]["run_id"]
+
+    # Top-level nodes have no parent.
+    assert outputs_by_node_id["outer_node"]["parent_run_id"] is None
+    assert outputs_by_node_id["final_node"]["parent_run_id"] is None
+
+    # inner_step nests under the intermediate subgraph root, not directly under outer_node.
+    inner_parent_id = outputs_by_node_id["inner_step"]["parent_run_id"]
+    assert inner_parent_id != outer_run_id, "inner_step should not be a direct child of outer_node"
+
+    # The intermediate subgraph root entry should exist and point to outer_node.
+    assert inner_parent_id in outputs_by_run_id, "Subgraph root entry missing from node_output messages"
+    subgraph_root = outputs_by_run_id[inner_parent_id]
+    assert subgraph_root["parent_run_id"] == outer_run_id
+    assert subgraph_root["status"] == "ok"
+
+
+
+async def test_fanout_all_edges_activated(fanout_graph):
+    """All fan-in edges (branch_a/b/c → sink) must be activated, not just the last one."""
+    ws_port = find_free_port()
+    viewport = watch(fanout_graph, port=find_free_port(), ws_port=ws_port, open_browser=False)
+
+    async with ws_collect(ws_port) as (messages, done):
+        await safe_ainvoke(viewport, {"value": "test", "results": []})
+
+    active_edges = [(m["source"], m["target"]) for m in messages if m["type"] == "edge_active"]
+
+    # All three fan-in edges must have been activated.
+    assert ("branch_a", "sink") in active_edges
+    assert ("branch_b", "sink") in active_edges
+    assert ("branch_c", "sink") in active_edges

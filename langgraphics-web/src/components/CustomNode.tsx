@@ -3,9 +3,9 @@ import {Handle, type Node, type NodeProps} from "@xyflow/react";
 import type {NodeData} from "../types";
 
 export const CustomNode = memo(function CustomNode({data}: NodeProps<Node<NodeData>>) {
-    const {label, handles} = data;
+    const {label, handles, isGroup} = data;
     return (
-        <div className="react-flow__node-default">
+        <div className={isGroup ? "react-flow__node-default langgraphics-group-node" : "react-flow__node-default"}>
             <div>{label}</div>
             {handles.map((h, i) => (
                 <Handle key={i} type={h.type} id={h.id} position={h.position} style={h.style}/>

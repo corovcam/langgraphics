@@ -26,6 +26,10 @@ export interface NodeData extends Record<string, unknown> {
     status: NodeStatus;
     handles: NodeHandle[];
     nodeType: "start" | "end" | "node";
+    /** True for top-level nodes that act as containers for subgraph children. */
+    isGroup?: boolean;
+    /** Set on child nodes; drives the `child-node` CSS class. */
+    parentNodeId?: string | null;
 }
 
 export interface EdgeData extends Record<string, unknown> {
@@ -38,6 +42,7 @@ export interface ProtocolNode {
     id: string;
     name: string;
     node_type: "start" | "end" | "node";
+    parent_id?: string | null;
 }
 
 export interface ProtocolEdge {
@@ -111,7 +116,7 @@ export interface NodeMessage {
     node_id: string;
     node_kind?: NodeKind | null;
     parent_run_id?: string | null;
-    status?: "ok" | "error";
+    status?: "ok" | "error" | "running";
     input?: string | null;
     output?: string | null;
     state?: string | null;

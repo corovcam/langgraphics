@@ -1,4 +1,4 @@
-import {useMemo} from "react";
+import {useMemo, useRef} from "react";
 import {type Edge, MarkerType, type Node} from "@xyflow/react";
 import type {EdgeData, EdgeStatus, ExecutionEvent, GraphMessage, NodeData, NodeStatus, ProtocolEdge, ProtocolNode} from "../types";
 import {computeLayout, type RankDir} from "../layout";
@@ -10,16 +10,42 @@ export function computeStatuses(events: ExecutionEvent[]): {
     const nodeStatuses = new Map<string, NodeStatus>();
     const edgeStatuses = new Map<string, EdgeStatus>();
     const edgeInfo = new Map<string, {source: string; target: string}>();
+    // Maps parent_node_id → Set of direct child node IDs (built from node_discovered events).
+    const childNodeMap = new Map<string, Set<string>>();
 
     for (const event of events) {
         if (event.type === "run_start") {
             nodeStatuses.clear();
             edgeStatuses.clear();
             edgeInfo.clear();
+            childNodeMap.clear();
         } else if (event.type === "node_discovered") {
             // Node started executing — mark it active immediately.
             if (nodeStatuses.get(event.node_id) !== "error") {
                 nodeStatuses.set(event.node_id, "active");
+            }
+            // Track parent → children for inner-edge deactivation.
+            if (event.parent_node_id) {
+                let children = childNodeMap.get(event.parent_node_id);
+                if (!children) {
+                    children = new Set();
+                    childNodeMap.set(event.parent_node_id, children);
+                }
+                children.add(event.node_id);
+            }
+        } else if (event.type === "node_output") {
+            // Node finished executing — demote from active to completed.
+            if (nodeStatuses.get(event.node_id) === "active") {
+                nodeStatuses.set(event.node_id, "completed");
+            }
+            // Deactivate any active inner-subgraph edges belonging to this node.
+            const children = childNodeMap.get(event.node_id);
+            if (children) {
+                for (const [id, info] of edgeInfo) {
+                    if (children.has(info.source) && edgeStatuses.get(id) === "active") {
+                        edgeStatuses.set(id, "traversed");
+                    }
+                }
             }
         } else if (event.type === "edge_active") {
             edgeInfo.set(event.edge_id, {source: event.source, target: event.target});
@@ -61,19 +87,25 @@ export function computeStatuses(events: ExecutionEvent[]): {
  *  nodes/edges discovered at runtime via node_discovered / edge_discovered. */
 export function buildDynamicTopology(
     base: GraphMessage | null,
-    events: ExecutionEvent[],
+    discoveryEvents: ExecutionEvent[],
 ): GraphMessage | null {
-    const hasDiscovery = events.some(
+    if (!base) return null;
+    const hasDiscovery = discoveryEvents.some(
         (e) => e.type === "node_discovered" || e.type === "edge_discovered",
     );
     if (!hasDiscovery) return base;
 
-    const nodes = new Map<string, ProtocolNode>(base?.nodes.map((n) => [n.id, n]) ?? []);
-    const edges = new Map<string, ProtocolEdge>(base?.edges.map((e) => [e.id, e]) ?? []);
+    const nodes = new Map<string, ProtocolNode>(base.nodes.map((n) => [n.id, n]));
+    const edges = new Map<string, ProtocolEdge>(base.edges.map((e) => [e.id, e]));
 
-    for (const event of events) {
+    for (const event of discoveryEvents) {
         if (event.type === "node_discovered" && !nodes.has(event.node_id)) {
-            nodes.set(event.node_id, {id: event.node_id, name: event.node_id, node_type: "node"});
+            nodes.set(event.node_id, {
+                id: event.node_id,
+                name: event.node_id,
+                node_type: "node",
+                parent_id: event.parent_node_id ?? null,
+            });
         } else if (event.type === "edge_discovered" && !edges.has(event.edge_id)) {
             edges.set(event.edge_id, {
                 id: event.edge_id,
@@ -88,15 +120,25 @@ export function buildDynamicTopology(
     return {type: "graph", nodes: [...nodes.values()], edges: [...edges.values()]};
 }
 
-export function useGraphState(topology: GraphMessage | null, events: ExecutionEvent[], rankDir: RankDir = "TB") {
+export function useGraphState(topology: GraphMessage | null, events: ExecutionEvent[], discoveryEvents: ExecutionEvent[], rankDir: RankDir = "TB") {
+    // dynamicTopology only changes when nodes/edges are discovered — not on every event.
+    // This prevents computeLayout (which runs dagre) from re-executing unnecessarily.
     const dynamicTopology = useMemo(
-        () => buildDynamicTopology(topology, events),
-        [topology, events],
+        () => buildDynamicTopology(topology, discoveryEvents),
+        [topology, discoveryEvents],
     );
 
+    const lastValidBaseRef = useRef<{nodes: Node<NodeData>[]; edges: Edge<EdgeData>[]} | null>(null);
     const base = useMemo(() => {
         if (!dynamicTopology) return {nodes: [] as Node<NodeData>[], edges: [] as Edge<EdgeData>[]};
-        return computeLayout(dynamicTopology, rankDir);
+        try {
+            const result = computeLayout(dynamicTopology, rankDir);
+            lastValidBaseRef.current = result;
+            return result;
+        } catch (err) {
+            console.error("[computeLayout] error:", err, "\ntopology:", dynamicTopology);
+            return lastValidBaseRef.current ?? {nodes: [] as Node<NodeData>[], edges: [] as Edge<EdgeData>[]};
+        }
     }, [dynamicTopology, rankDir]);
 
     return useMemo(() => {
@@ -108,7 +150,8 @@ export function useGraphState(topology: GraphMessage | null, events: ExecutionEv
         const nodes = base.nodes.map((node) => {
             const status = nodeStatuses.get(node.id);
             if (status === "active") activeNodeIds.push(node.id);
-            return {...node, className: status};
+            const childClass = node.data.parentNodeId ? "child-node" : "";
+            return {...node, className: [status, childClass].filter(Boolean).join(" ")};
         });
 
         const edges = base.edges.map((edge) => {

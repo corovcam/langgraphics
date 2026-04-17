@@ -20,7 +20,7 @@ class GraphState(TypedDict):
 
 
 async def initial_node(state: GraphState) -> dict:
-    await asyncio.sleep(2)
+    await asyncio.sleep(3)
     return {"initial_result": "initial done"}
 
 

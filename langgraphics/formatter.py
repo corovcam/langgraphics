@@ -7,6 +7,18 @@ from langchain_core.messages import messages_to_dict
 from langchain_core.tracers.schemas import Run
 
 
+def _json_default(obj: Any) -> Any:
+    """Fallback JSON serializer for non-standard types."""
+    if hasattr(obj, "__dict__"):
+        return obj.__dict__
+    if hasattr(obj, "_asdict"):
+        return obj._asdict()
+    try:
+        return vars(obj)
+    except TypeError:
+        return repr(obj)
+
+
 class Formatter:
     models: dict = None
 
@@ -43,7 +55,7 @@ class Formatter:
             return json.dumps(
                 ensure_ascii=False,
                 obj=func(*args, **kwargs),
-                default=lambda x: x.__dict__,
+                default=_json_default,
             )
 
         return wrapper

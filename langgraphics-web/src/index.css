@@ -97,6 +97,22 @@ html, body, #root {
     width: unset;
 }
 
+/* Group nodes that contain subgraph children fill their xyflow container. */
+.react-flow__node .react-flow__node-default.langgraphics-group-node {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    align-items: flex-start;
+    justify-content: flex-start;
+}
+
+/* Subgraph child nodes — subtle blue accent so they read as "inside" the parent. */
+.react-flow__node.child-node .react-flow__node-default {
+    font-size: 11px;
+    background: rgba(59, 130, 246, 0.06);
+    border-color: rgba(59, 130, 246, 0.4);
+}
+
 .react-flow__node.error .react-flow__node-default {
     border-color: #ef4444;
     color: #ef4444;
@@ -270,6 +286,12 @@ html, body, #root {
 .inspect-node-label.error,
 .inspect-step-label.error {
     color: #ef4444;
+}
+
+.inspect-node-label.running,
+.inspect-step-label.running {
+    color: #6b7280;
+    font-style: italic;
 }
 
 .inspect-step-icon {
