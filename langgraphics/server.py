@@ -1,4 +1,6 @@
 """Server implementation"""
+from typing import AsyncGenerator
+from contextlib import asynccontextmanager
 
 import asyncio
 import threading
@@ -7,10 +9,16 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 from socketserver import TCPServer
+import httpx
+import requests
+import logging
 
 from websockets.asyncio.server import serve
 
 from .broadcaster import Broadcaster
+
+
+logger = logging.getLogger(__name__)
 
 
 def _start_http_server(host: str, port: int) -> TCPServer:
@@ -50,8 +58,8 @@ class Server:
 
     def __init__(
         self,
-        broadcaster: Broadcaster,
-        http_server: TCPServer,
+        broadcaster: Broadcaster | None,
+        http_server: TCPServer | None,
         host: str,
         port: int,
         ws_port: int,
@@ -79,9 +87,40 @@ class Server:
             await self.broadcaster.shutdown()
         if self._http_server is not None:
             self._http_server.shutdown()
+            
+    async def healthcheck(self) -> bool:
+        try:
+            async with httpx.AsyncClient() as client:
+                res = await client.get(self.url)
+                if res.status_code == 200 or res.status_code == 404:
+                    return True
+                else:
+                    return False
+        except httpx.HTTPError as e:
+            logger.exception("LangGraphics server error.")
+            return False
+    
+    def healthcheck_sync(self) -> bool:
+        try:
+            res = requests.get(self.url)
+            if res.status_code == 200 or res.status_code == 404:
+                return True
+            else:
+                return False
+        except requests.exceptions.RequestException as e:
+            logger.exception("LangGraphics server error.")
+            return False
+
+@asynccontextmanager
+async def connect_to_langgraphics_server(host: str = "localhost", port: int = 8764, ws_port: int = 8765) -> AsyncGenerator[Server | None, None]:
+    server = Server(None, None, host, port, ws_port)
+    try:
+        yield server
+    finally:
+        await server.shutdown()
 
 
-def connect_server(
+async def connect_server(
     host: str = "localhost",
     port: int = 8764,
     ws_port: int = 8765,
@@ -91,10 +130,32 @@ def connect_server(
     Use this when the server was started independently (e.g. via the
     ``langgraphics-server`` CLI) and you just need to point ``watch()`` at it::
 
-        server = connect_server()
+        server = await connect_server()
         graph = watch(my_graph, server=server)
     """
-    return Server(None, None, host, port, ws_port)
+    server = Server(None, None, host, port, ws_port)
+    if await server.healthcheck():
+        return server
+    raise Exception("LangGraphics server is not running.")
+
+
+def connect_server_sync(
+    host: str = "localhost",
+    port: int = 8764,
+    ws_port: int = 8765,
+) -> Server:
+    """Return a handle to an already-running server without starting anything.
+
+    Use this when the server was started independently (e.g. via the
+    ``langgraphics-server`` CLI) and you just need to point ``watch()`` at it::
+
+        server = await connect_server()
+        graph = watch(my_graph, server=server)
+    """
+    server = Server(None, None, host, port, ws_port)
+    if server.healthcheck_sync():
+        return server
+    raise Exception("LangGraphics server is not running.")
 
 
 def start_server(

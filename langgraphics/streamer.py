@@ -7,6 +7,7 @@ from typing import Any
 
 from langchain_core.tracers.base import AsyncBaseTracer
 from langchain_core.tracers.schemas import Run
+from langgraph.graph.state import CompiledStateGraph
 
 from .formatter import Formatter, _json_default
 
@@ -459,6 +460,7 @@ class BroadcastingTracer(AsyncBaseTracer):
         await self._emit_sub_output(run)
 
 
+# class Viewport(CompiledStateGraph[StateT, ContextT, InputT, OutputT]):
 class Viewport:
     def __init__(
         self,
@@ -466,7 +468,9 @@ class Viewport:
         broadcast_fn: Callable[[dict[str, Any]], Awaitable[None]],
         shutdown_fn: Callable[[], Awaitable[None]],
         edge_seeding: dict[tuple[str, str], str] | None = None,
+        **kwargs: Any,
     ) -> None:
+        # super().__init__(**kwargs)
         self.graph = graph
         self._broadcast_fn = broadcast_fn
         self._shutdown_fn = shutdown_fn
@@ -476,7 +480,10 @@ class Viewport:
         return getattr(self.graph, name)
 
     def _make_config(self, config: Any) -> dict[str, Any]:
-        tracer = BroadcastingTracer(self._broadcast_fn, self._edge_seeding)
+        tracer = build_langgraphics_tracer(
+            self._broadcast_fn,
+            self._edge_seeding,
+        )
         merged: dict[str, Any] = dict(config or {})
         merged["callbacks"] = list(merged.get("callbacks") or []) + [tracer]
         return merged
@@ -511,3 +518,9 @@ class Viewport:
                     break
         finally:
             loop.close()
+
+def build_langgraphics_tracer(
+    broadcast_fn: Callable[[dict[str, Any]], Awaitable[None]],
+    edge_seeding: dict[tuple[str, str], str] | None = None,
+) -> BroadcastingTracer:
+    return BroadcastingTracer(broadcast_fn, edge_seeding)
