@@ -124,7 +124,7 @@ async def connect_server(
     host: str = "localhost",
     port: int = 8764,
     ws_port: int = 8765,
-) -> Server:
+) -> Server | None:
     """Return a handle to an already-running server without starting anything.
 
     Use this when the server was started independently (e.g. via the
@@ -136,26 +136,25 @@ async def connect_server(
     server = Server(None, None, host, port, ws_port)
     if await server.healthcheck():
         return server
-    raise Exception("LangGraphics server is not running.")
+    else:
+        return None
 
 
 def connect_server_sync(
     host: str = "localhost",
     port: int = 8764,
     ws_port: int = 8765,
-) -> Server:
+) -> Server | None:
     """Return a handle to an already-running server without starting anything.
 
     Use this when the server was started independently (e.g. via the
     ``langgraphics-server`` CLI) and you just need to point ``watch()`` at it::
 
-        server = await connect_server()
+        server = connect_server_sync()
         graph = watch(my_graph, server=server)
     """
     server = Server(None, None, host, port, ws_port)
-    if server.healthcheck_sync():
-        return server
-    raise Exception("LangGraphics server is not running.")
+    return server
 
 
 def start_server(

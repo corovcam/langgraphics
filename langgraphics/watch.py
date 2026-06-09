@@ -1,3 +1,4 @@
+import asyncio
 from langchain_core.tracers.base import AsyncBaseTracer
 from langgraph.graph.state import CompiledStateGraph
 from contextlib import asynccontextmanager
@@ -65,8 +66,7 @@ def watch(
     return Viewport(graph, broadcast_fn, shutdown_fn, edge_seeding)
 
 
-@asynccontextmanager
-async def create_langgraphics_watcher(
+def create_langgraphics_watcher(
     builder_or_graph: Any,
     *,
     server: Server | None = None,
@@ -78,7 +78,7 @@ async def create_langgraphics_watcher(
     mode: Literal["auto", "manual"] = "auto",
     inspect: Literal["off", "tree", "full"] = "off",
     theme: Literal["system", "dark", "light"] = "system",
-) -> AsyncGenerator[AsyncBaseTracer | None, None]:
+) -> AsyncBaseTracer | None:
     relay: PublisherRelay | None = None
     
     async def broadcast_fn(message: dict[str, Any]) -> None:
@@ -116,12 +116,7 @@ async def create_langgraphics_watcher(
             edge_seeding,
         )
         
-        yield tracer
+        return tracer
     except Exception as e:
         logger.exception("Error in LangGraphics Watcher:")
-        yield None
-    finally:
-        if relay:
-            await relay.shutdown()
-        if server:
-            await server.shutdown()
+        return None
